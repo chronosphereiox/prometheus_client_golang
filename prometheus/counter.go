@@ -16,8 +16,8 @@ package prometheus
 import (
 	"errors"
 	"math"
-	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	dto "github.com/prometheus/client_model/go"
 )
@@ -70,8 +70,6 @@ func NewCounter(opts CounterOpts) Counter {
 }
 
 type counter struct {
-	sync.RWMutex
-
 	// valBits contains the bits of the represented float64 value, while
 	// valInt stores values that are exact integers. Both have to go first
 	// in the struct to guarantee alignment for atomic operations.
@@ -81,7 +79,7 @@ type counter struct {
 
 	selfCollector
 	desc    *Desc
-	traceID *string
+	traceID unsafe.Pointer
 
 	labelPairs []*dto.LabelPair
 }
@@ -114,9 +112,7 @@ func (c *counter) Inc() {
 }
 
 func (c *counter) WithTraceID(traceID *string) Counter {
-	c.Lock()
-	c.traceID = traceID
-	c.Unlock()
+	atomic.StorePointer(&c.traceID, unsafe.Pointer(traceID))
 	return c
 }
 
@@ -124,10 +120,9 @@ func (c *counter) Write(out *dto.Metric) error {
 	fval := math.Float64frombits(atomic.LoadUint64(&c.valBits))
 	ival := atomic.LoadUint64(&c.valInt)
 	val := fval + float64(ival)
-	c.Lock()
-	out.TraceId = c.traceID
-	c.traceID = nil
-	c.Unlock()
+	t := (*string)(atomic.LoadPointer(&c.traceID))
+	out.TraceId = t
+	atomic.StorePointer(&c.traceID, nil) // comment this line if we don't want to clean the traceID after it was scraped once.
 
 	return populateMetric(CounterValue, val, c.labelPairs, out)
 }
