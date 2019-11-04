@@ -11,4 +11,6 @@ require (
 	golang.org/x/sys v0.0.0-20191010194322-b09406accb47
 )
 
+replace github.com/prometheus/client_model => ../client_model
+
 go 1.11
