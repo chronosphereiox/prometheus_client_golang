@@ -47,6 +47,7 @@ type Histogram interface {
 
 	// Observe adds a single observation to the histogram.
 	Observe(float64)
+	WithExemplar(name, value string)
 }
 
 // bucketLabel is used for the label that defines the upper bound of a
@@ -218,9 +219,10 @@ type histogramCounts struct {
 	// observations. sumBits and count have to go first in the struct to
 	// guarantee alignment for atomic operations.
 	// http://golang.org/pkg/sync/atomic/#pkg-note-BUG
-	sumBits uint64
-	count   uint64
-	buckets []uint64
+	sumBits   uint64
+	count     uint64
+	buckets   []uint64
+	exemplars []*sync.Map
 }
 
 type histogram struct {
@@ -254,6 +256,7 @@ type histogram struct {
 
 	upperBounds []float64
 	labelPairs  []*dto.LabelPair
+	exemplars   *sync.Map
 }
 
 func (h *histogram) Desc() *Desc {
@@ -280,6 +283,18 @@ func (h *histogram) Observe(v float64) {
 
 	if i < len(h.upperBounds) {
 		atomic.AddUint64(&hotCounts.buckets[i], 1)
+		if h.exemplars != nil {
+			h.exemplars.Range(func(k, v interface{}) bool {
+				if hotCounts.exemplars == nil {
+					hotCounts.exemplars = make([]*sync.Map, len(hotCounts.buckets))
+				}
+				if hotCounts.exemplars[i] == nil {
+					hotCounts.exemplars[i] = &sync.Map{}
+				}
+				hotCounts.exemplars[i].Store(k, v)
+				return true
+			})
+		}
 	}
 	for {
 		oldBits := atomic.LoadUint64(&hotCounts.sumBits)
@@ -291,6 +306,13 @@ func (h *histogram) Observe(v float64) {
 	// Increment count last as we take it as a signal that the observation
 	// is complete.
 	atomic.AddUint64(&hotCounts.count, 1)
+}
+
+func (h *histogram) WithExemplar(key, value string) {
+	if h.exemplars == nil {
+		h.exemplars = &sync.Map{}
+	}
+	h.exemplars.Store(key, value)
 }
 
 func (h *histogram) Write(out *dto.Metric) error {
@@ -329,10 +351,30 @@ func (h *histogram) Write(out *dto.Metric) error {
 			CumulativeCount: proto.Uint64(cumCount),
 			UpperBound:      proto.Float64(upperBound),
 		}
+		if coldCounts.exemplars != nil && coldCounts.exemplars[i] != nil {
+			coldCounts.exemplars[i].Range(func(key, value interface{}) bool {
+				if his.Bucket[i].Exemplars == nil {
+					his.Bucket[i].Exemplars = make(map[string]string)
+				}
+				his.Bucket[i].Exemplars[key.(string)] = value.(string)
+				coldCounts.exemplars[i].Delete(key) // remove this line if we don't want to clean the exemplars after it was scraped once.
+				return true
+			})
+		}
 	}
 
 	out.Histogram = his
 	out.Label = h.labelPairs
+	if h.exemplars != nil {
+		h.exemplars.Range(func(key, value interface{}) bool {
+			if out.Exemplars == nil {
+				out.Exemplars = make(map[string]string)
+			}
+			out.Exemplars[key.(string)] = value.(string)
+			h.exemplars.Delete(key) // remove this line if we don't want to clean the exemplars after it was scraped once.
+			return true
+		})
+	}
 
 	// Finally add all the cold counts to the new hot counts and reset the cold counts.
 	atomic.AddUint64(&hotCounts.count, count)
@@ -489,6 +531,7 @@ type constHistogram struct {
 	sum        float64
 	buckets    map[float64]uint64
 	labelPairs []*dto.LabelPair
+	exemplars  *sync.Map
 }
 
 func (h *constHistogram) Desc() *Desc {

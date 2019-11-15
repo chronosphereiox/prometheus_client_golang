@@ -17,6 +17,7 @@ package prometheus
 // Histogram and Summary to add observations.
 type Observer interface {
 	Observe(float64)
+	WithExemplar(key, value string)
 }
 
 // The ObserverFunc type is an adapter to allow the use of ordinary

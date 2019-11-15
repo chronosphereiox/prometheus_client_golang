@@ -16,8 +16,8 @@ package prometheus
 import (
 	"errors"
 	"math"
+	"sync"
 	"sync/atomic"
-	"unsafe"
 
 	dto "github.com/prometheus/client_model/go"
 )
@@ -42,7 +42,7 @@ type Counter interface {
 	// 0.
 	Add(float64)
 
-	WithTraceID(traceID *string) Counter
+	WithExemplar(name, value string) Counter
 }
 
 // CounterOpts is an alias for Opts. See there for doc comments.
@@ -78,8 +78,8 @@ type counter struct {
 	valInt  uint64
 
 	selfCollector
-	desc    *Desc
-	traceID unsafe.Pointer
+	desc      *Desc
+	exemplars *sync.Map
 
 	labelPairs []*dto.LabelPair
 }
@@ -111,8 +111,11 @@ func (c *counter) Inc() {
 	atomic.AddUint64(&c.valInt, 1)
 }
 
-func (c *counter) WithTraceID(traceID *string) Counter {
-	atomic.StorePointer(&c.traceID, unsafe.Pointer(traceID))
+func (c *counter) WithExemplar(name, value string) Counter {
+	if c.exemplars == nil {
+		c.exemplars = &sync.Map{}
+	}
+	c.exemplars.Store(name, value)
 	return c
 }
 
@@ -120,9 +123,17 @@ func (c *counter) Write(out *dto.Metric) error {
 	fval := math.Float64frombits(atomic.LoadUint64(&c.valBits))
 	ival := atomic.LoadUint64(&c.valInt)
 	val := fval + float64(ival)
-	t := (*string)(atomic.LoadPointer(&c.traceID))
-	out.TraceId = t
-	atomic.StorePointer(&c.traceID, nil) // comment this line if we don't want to clean the traceID after it was scraped once.
+
+	if c.exemplars != nil {
+		c.exemplars.Range(func(key, value interface{}) bool {
+			if out.Exemplars == nil {
+				out.Exemplars = make(map[string]string)
+			}
+			out.Exemplars[key.(string)] = value.(string)
+			c.exemplars.Delete(key) // remove this line if we don't want to clean the exemplars after it was scraped once.
+			return true
+		})
+	}
 
 	return populateMetric(CounterValue, val, c.labelPairs, out)
 }
